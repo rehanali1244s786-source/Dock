@@ -1,0 +1,1660 @@
+name: Build Dock APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write project files
+        run: |
+          cat > settings.gradle <<'DOCK_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Dock"
+          include ':app'
+          DOCK_EOF
+          cat > build.gradle <<'DOCK_EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          DOCK_EOF
+          cat > gradle.properties <<'DOCK_EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          DOCK_EOF
+          mkdir -p app
+          cat > app/build.gradle <<'DOCK_EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.dock.app'
+              compileSdk 35
+              defaultConfig {
+                  applicationId "com.dock.app"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 23
+                  versionName "3.10"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.13.1'
+          }
+          DOCK_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'DOCK_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.SEND_SMS"/>
+              <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+              <uses-permission android:name="android.permission.READ_CONTACTS"/>
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+              <queries>
+                  <intent><action android:name="android.speech.RecognitionService"/></intent>
+              </queries>
+              <application android:label="Dock" android:icon="@drawable/ic_dock" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".SplashActivity" android:exported="true"
+                      android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".MainActivity" android:exported="false"
+                      android:windowSoftInputMode="adjustResize"/>
+                  <service android:name=".AssistantService" android:exported="false"
+                      android:foregroundServiceType="microphone"
+                      android:stopWithTask="false"/>
+                  <service android:name=".MessageListener" android:exported="true"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService"/>
+                      </intent-filter>
+                  </service>
+                  <receiver android:name=".BootReceiver" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          DOCK_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_dock.xml <<'DOCK_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFFFFF" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#000000" android:pathData="M54,80C30,62 20,50 20,38C20,28 28,22 36,22C43,22 50,27 54,33C58,27 65,22 72,22C80,22 88,28 88,38C88,50 78,62 54,80Z"/>
+          </vector>
+          DOCK_EOF
+          mkdir -p app/src/main/java/com/dock/app
+          cat > app/src/main/java/com/dock/app/MainActivity.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.Manifest
+          import android.app.Activity
+          import android.animation.ArgbEvaluator
+          import android.animation.ObjectAnimator
+          import android.animation.ValueAnimator
+          import android.graphics.drawable.RippleDrawable
+          import android.app.AlertDialog
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.TimePickerDialog
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.telephony.SubscriptionManager
+          import android.provider.Settings
+          import android.speech.tts.TextToSpeech
+          import android.text.Editable
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.MotionEvent
+          import android.view.ViewGroup
+          import android.view.animation.DecelerateInterpolator
+          import android.view.animation.OvershootInterpolator
+          import android.widget.EditText
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              private val BG = Color.parseColor("#000000")
+              private val CARD = Color.parseColor("#141414")
+              private val FIELD = Color.parseColor("#0A0A0A")
+              private val ACC = Color.parseColor("#7C6CFF")
+              private val ACC2 = Color.parseColor("#22D3C5")
+              private val MUTED = Color.parseColor("#98A2C8")
+              private val OK = Color.parseColor("#2ED573")
+              private val BAD = Color.parseColor("#FF6B81")
+              private val TXT = Color.WHITE
+              private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+              private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+              private var pulse: ObjectAnimator? = null
+              private var introPlayed = false
+              private var animateCards = false
+              private var cardIdx = 0
+              private var spin: ObjectAnimator? = null
+              private val loops = ArrayList<android.animation.Animator>()
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.statusBarColor = BG
+                  window.navigationBarColor = BG
+                  getSystemService(NotificationManager::class.java).cancel(2)
+                  Prefs.createAlertChannel(this)
+                  if (intent.getBooleanExtra("autostart", false) && micOk() && AssistantService.instance == null) {
+                      startForegroundService(Intent(this, AssistantService::class.java))
+                  }
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  pulse?.cancel()
+                  spin?.cancel()
+                  loops.forEach { it.cancel() }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  build()
+              }
+
+              override fun onRequestPermissionsResult(c: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(c, p, r)
+                  build()
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun bg(color: Int, r: Int = 20) = GradientDrawable().apply {
+                  setColor(color)
+                  cornerRadius = dp(r).toFloat()
+              }
+
+              private fun micOk() =
+                  checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+              private fun listenerOn() =
+                  Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+                      ?.contains(packageName) == true
+
+              private fun batteryOk() =
+                  getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+              private fun askPerms() {
+                  val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
+                  if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
+                  requestPermissions(list.toTypedArray(), 1)
+              }
+
+              private fun toggle() {
+                  if (AssistantService.instance != null) {
+                      stopService(Intent(this, AssistantService::class.java))
+                  } else {
+                      if (!micOk()) { askPerms(); return }
+                      if (!listenerOn()) Toast.makeText(this, "Pehle Notification Access dein", Toast.LENGTH_LONG).show()
+                      startForegroundService(Intent(this, AssistantService::class.java))
+                  }
+                  window.decorView.postDelayed({ build() }, 700)
+              }
+
+              private fun label(t: String, size: Float, color: Int, bold: Boolean = false) =
+                  TextView(this).apply {
+                      text = t
+                      textSize = size
+                      setTextColor(color)
+                      if (bold) typeface = Typeface.DEFAULT_BOLD
+                  }
+
+              // 3D press effect: the view tilts and shrinks on touch, then springs back.
+              private fun pressFx(v: View, action: Int) {
+                  when (action) {
+                      MotionEvent.ACTION_DOWN -> {
+                          v.cameraDistance = 12000f * resources.displayMetrics.density
+                          v.animate().scaleX(0.92f).scaleY(0.92f).rotationX(10f).alpha(0.85f).setDuration(110).start()
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                          v.animate().scaleX(1f).scaleY(1f).rotationX(0f).alpha(1f)
+                              .setDuration(260).setInterpolator(OvershootInterpolator()).start()
+                      }
+                  }
+              }
+
+              private fun chip(t: String, soft: Boolean, onClick: () -> Unit): TextView =
+                  TextView(this).apply {
+                      text = t
+                      textSize = 13f
+                      setTextColor(Color.WHITE)
+                      typeface = Typeface.DEFAULT_BOLD
+                      setPadding(dp(14), dp(7), dp(14), dp(7))
+                      val base = bg(if (soft) Color.parseColor("#2A3260") else ACC, 14)
+                      background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#55FFFFFF")), base, null)
+                      if (!soft) {
+                          ValueAnimator.ofObject(ArgbEvaluator(), ACC, ACC2, ACC).apply {
+                              duration = 2600
+                              repeatCount = ValueAnimator.INFINITE
+                              addUpdateListener { base.setColor(it.animatedValue as Int) }
+                              start()
+                              loops.add(this)
+                          }
+                      }
+                      elevation = dp(4).toFloat()
+                      setOnTouchListener { v, e -> pressFx(v, e.action); false }
+                      setOnClickListener { onClick() }
+                  }
+
+              private fun card(title: String, sub: String, body: LinearLayout.() -> Unit): LinearLayout {
+                  val c = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = bg(CARD)
+                      setPadding(dp(16), dp(16), dp(16), dp(16))
+                      layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) }
+                  }
+                  c.addView(label(title, 17f, TXT, true))
+                  c.addView(label(sub, 12f, MUTED))
+                  c.body()
+                  c.elevation = dp(6).toFloat()
+                  c.cameraDistance = 12000f * resources.displayMetrics.density
+                  c.setOnTouchListener { v, e ->
+                      val w = v.width.toFloat().coerceAtLeast(1f)
+                      val h = v.height.toFloat().coerceAtLeast(1f)
+                      when (e.action) {
+                          MotionEvent.ACTION_MOVE -> {
+                              v.rotationY = ((e.x / w) - 0.5f) * 8f
+                              v.rotationX = (0.5f - (e.y / h)) * 8f
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                              v.animate().rotationX(0f).rotationY(0f).setDuration(300)
+                                  .setInterpolator(OvershootInterpolator()).start()
+                          }
+                      }
+                      false
+                  }
+                  if (animateCards) {
+                      c.cameraDistance = 12000f * resources.displayMetrics.density
+                      c.alpha = 0f
+                      c.translationY = dp(36).toFloat()
+                      c.rotationX = 14f
+                      c.animate().alpha(1f).translationY(0f).rotationX(0f)
+                          .setStartDelay(cardIdx++ * 70L).setDuration(520)
+                          .setInterpolator(DecelerateInterpolator()).start()
+                  }
+                  return c
+              }
+
+              private fun statusRow(name: String, ok: Boolean, fix: () -> Unit): LinearLayout {
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, dp(12), 0, 0)
+                  }
+                  r.addView(View(this).apply {
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(if (ok) OK else BAD)
+                      }
+                      layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(12) }
+                  })
+                  r.addView(label(name, 15f, TXT).apply {
+                      layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                  })
+                  r.addView(chip(if (ok) "Theek hai" else "Theek karein", ok) { if (!ok) fix() })
+                  return r
+              }
+
+              private fun actionRow(name: String, btn: String, onClick: () -> Unit): LinearLayout {
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, dp(12), 0, 0)
+                  }
+                  r.addView(View(this).apply {
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          setColor(Color.parseColor("#FFB84D"))
+                      }
+                      layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(12) }
+                  })
+                  r.addView(label(name, 15f, TXT).apply {
+                      layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                  })
+                  r.addView(chip(btn, false) { onClick() })
+                  return r
+              }
+
+              private fun openAutoStart() {
+                  val m = (Build.MANUFACTURER + " " + Build.BRAND).lowercase()
+                  val list = ArrayList<Pair<String, String>>()
+                  if (m.contains("xiaomi") || m.contains("redmi") || m.contains("poco")) {
+                      list.add("com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity")
+                  }
+                  if (m.contains("oppo") || m.contains("realme") || m.contains("oneplus")) {
+                      list.add("com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity")
+                      list.add("com.coloros.safecenter" to "com.coloros.safecenter.startupapp.StartupAppListActivity")
+                      list.add("com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity")
+                  }
+                  if (m.contains("vivo") || m.contains("iqoo")) {
+                      list.add("com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")
+                      list.add("com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity")
+                  }
+                  if (m.contains("huawei") || m.contains("honor")) {
+                      list.add("com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")
+                      list.add("com.huawei.systemmanager" to "com.huawei.systemmanager.optimize.process.ProtectActivity")
+                  }
+                  if (m.contains("samsung")) {
+                      list.add("com.samsung.android.lool" to "com.samsung.android.sm.battery.ui.BatteryActivity")
+                      list.add("com.samsung.android.lool" to "com.samsung.android.sm.ui.battery.BatteryActivity")
+                  }
+                  if (m.contains("asus")) {
+                      list.add("com.asus.mobilemanager" to "com.asus.mobilemanager.powersaver.PowerSaverSettings")
+                  }
+                  for ((pkg, cls) in list) {
+                      try {
+                          startActivity(Intent().setComponent(ComponentName(pkg, cls)))
+                          Toast.makeText(this, "Yahan " + Prefs.name(this) + " ko allow / ON karein", Toast.LENGTH_LONG).show()
+                          return
+                      } catch (e: Exception) {
+                      }
+                  }
+                  startActivity(
+                      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                          .setData(Uri.parse("package:" + packageName))
+                  )
+                  Toast.makeText(this, "Yahan Battery ya Auto-start dhoondh kar allow karein", Toast.LENGTH_LONG).show()
+              }
+
+              private fun askSimPerms() {
+                  requestPermissions(
+                      arrayOf(
+                          Manifest.permission.SEND_SMS,
+                          Manifest.permission.READ_PHONE_STATE,
+                          Manifest.permission.READ_CONTACTS
+                      ), 2
+                  )
+              }
+
+              private fun simInfo(): String {
+                  if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return ""
+                  return try {
+                      val subs = getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList
+                          ?: return ""
+                      subs.sortedBy { it.simSlotIndex }
+                          .joinToString("   ") { "SIM " + (it.simSlotIndex + 1) + ": " + it.displayName }
+                  } catch (e: Exception) {
+                      ""
+                  }
+              }
+
+              private fun switchRow(title: String, sub: String, key: String, def: Boolean): LinearLayout {
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, dp(14), 0, 0)
+                  }
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                      setPadding(0, 0, dp(12), 0)
+                  }
+                  col.addView(label(title, 15f, TXT))
+                  col.addView(label(sub, 12f, MUTED))
+                  val sw = Switch(this).apply {
+                      isChecked = Prefs.bool(this@MainActivity, key, def)
+                      trackTintList = ColorStateList(
+                          arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+                          intArrayOf(ACC, Color.parseColor("#39406A"))
+                      )
+                      thumbTintList = ColorStateList.valueOf(Color.WHITE)
+                      setOnCheckedChangeListener { view, v ->
+                          Prefs.setBool(this@MainActivity, key, v)
+                          view.animate().scaleX(1.12f).scaleY(1.12f).setDuration(120).withEndAction {
+                              view.animate().scaleX(1f).scaleY(1f).setDuration(180)
+                                  .setInterpolator(OvershootInterpolator()).start()
+                          }.start()
+                      }
+                  }
+                  r.addView(col)
+                  r.addView(sw)
+                  return r
+              }
+
+              private fun field(ph: String, value: String, onChange: (String) -> Unit): EditText =
+                  EditText(this).apply {
+                      setText(value)
+                      hint = ph
+                      setTextColor(TXT)
+                      setHintTextColor(MUTED)
+                      textSize = 14f
+                      background = bg(FIELD, 12)
+                      setPadding(dp(12), dp(10), dp(12), dp(10))
+                      layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) }
+                      addTextChangedListener(object : TextWatcher {
+                          override fun afterTextChanged(s: Editable?) { onChange(s?.toString() ?: "") }
+                          override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                          override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                      })
+                  }
+
+              private fun seek(key: String, lo: Int, hi: Int, def: Int) = SeekBar(this).apply {
+                  max = hi - lo
+                  progress = Prefs.int(this@MainActivity, key, def) - lo
+                  layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(4) }
+                  setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
+                          Prefs.setInt(this@MainActivity, key, p + lo)
+                      }
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+              }
+
+              private fun fmt(m: Int): String {
+                  val h = m / 60
+                  val mm = m % 60
+                  val ap = if (h < 12) "AM" else "PM"
+                  val h12 = if (h % 12 == 0) 12 else h % 12
+                  return h12.toString() + ":" + (if (mm < 10) "0" else "") + mm + " " + ap
+              }
+
+              private fun timeChip(key: String, def: Int): TextView {
+                  val m = Prefs.int(this, key, def)
+                  return chip(fmt(m), false) {
+                      TimePickerDialog(this, { _, h, mm ->
+                          Prefs.setInt(this, key, h * 60 + mm)
+                          build()
+                      }, m / 60, m % 60, false).show()
+                  }
+              }
+
+              // Presets. Roman Urdu uses the English voice with Roman Urdu spelling rules.
+              private fun pickLang() {
+                  val presets = linkedMapOf(
+                      "ur-PK" to "Urdu",
+                      "en-IN" to "English (India)",
+                      "roman" to "Roman Urdu (English voice + Roman Urdu spelling)"
+                  )
+                  AlertDialog.Builder(this).setTitle("Bhasha chunein")
+                      .setItems(presets.values.toTypedArray()) { _, i ->
+                          val key = presets.keys.elementAt(i)
+                          if (key == "roman") {
+                              Prefs.setStr(this, "tts_lang", "en-IN")
+                              Prefs.setStr(this, "pron", "JWN=jaan; JAN=jaan; Ji=jee; Dock=Dhok")
+                          } else {
+                              Prefs.setStr(this, "tts_lang", key)
+                          }
+                          restartAssistant()
+                          build()
+                      }.show()
+              }
+
+              private fun pickEngine() {
+                  val probe = TextToSpeech(this, null)
+                  val engines = probe.engines
+                  probe.shutdown()
+                  val labels = (listOf("Default (phone ka)") + engines.map { it.label }).toTypedArray()
+                  val ids = listOf("") + engines.map { it.name }
+                  AlertDialog.Builder(this).setTitle("TTS engine chunein")
+                      .setItems(labels) { _, i ->
+                          Prefs.setStr(this, "tts_engine", ids[i])
+                          Prefs.setStr(this, "tts_voice", "")
+                          restartAssistant()
+                          build()
+                      }.show()
+              }
+
+              private fun pickVoice() {
+                  val engine = Prefs.str(this, "tts_engine", "")
+                  var probe: TextToSpeech? = null
+                  val listener = TextToSpeech.OnInitListener { status ->
+                      val t = probe ?: return@OnInitListener
+                      val voices = if (status == TextToSpeech.SUCCESS) t.voices?.sortedBy { it.name }.orEmpty() else emptyList()
+                      t.shutdown()
+                      if (voices.isEmpty()) {
+                          Toast.makeText(this, "Is engine mein koi voice nahi mili", Toast.LENGTH_LONG).show()
+                          return@OnInitListener
+                      }
+                      val labels = (listOf("Default (calm female)") + voices.map { it.name + "  (" + it.locale + ")" }).toTypedArray()
+                      val names = listOf("") + voices.map { it.name }
+                      AlertDialog.Builder(this).setTitle("Awaz chunein")
+                          .setItems(labels) { _, i ->
+                              Prefs.setStr(this, "tts_voice", names[i])
+                              build()
+                          }.show()
+                  }
+                  probe = if (engine.isEmpty()) TextToSpeech(this, listener) else TextToSpeech(this, listener, engine)
+              }
+
+              private fun testVoice() {
+                  val engine = Prefs.str(this, "tts_engine", "")
+                  var probe: TextToSpeech? = null
+                  val listener = TextToSpeech.OnInitListener { status ->
+                      val t = probe ?: return@OnInitListener
+                      if (status == TextToSpeech.SUCCESS) {
+                          Prefs.applyVoice(this, t)
+                          t.speak("Ji, main " + Prefs.name(this) + " hoon. Kaisi lagi meri awaz?", TextToSpeech.QUEUE_FLUSH, null, "test")
+                          window.decorView.postDelayed({ t.shutdown() }, 6000)
+                      } else t.shutdown()
+                  }
+                  probe = if (engine.isEmpty()) TextToSpeech(this, listener) else TextToSpeech(this, listener, engine)
+              }
+
+              private fun restartAssistant() {
+                  if (AssistantService.instance != null) {
+                      stopService(Intent(this, AssistantService::class.java))
+                      window.decorView.postDelayed({
+                          startForegroundService(Intent(this, AssistantService::class.java))
+                      }, 800)
+                  }
+              }
+
+              // True when the app is allowed to show notifications (needed for reply-failure alerts).
+              private fun alertsOn() =
+                  androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()
+
+              private fun testAlert() {
+                  val n = Notification.Builder(this, "dock_alerts")
+                      .setContentTitle("Test alert")
+                      .setContentText("Ye test notification hai. Aisa alert tab aayega jab reply nahi jayega.")
+                      .setSmallIcon(android.R.drawable.stat_notify_error)
+                      .setAutoCancel(true)
+                      .build()
+                  getSystemService(NotificationManager::class.java).notify(999, n)
+                  if (Prefs.bool(this, "alerts_voice", true)) {
+                      speakOnce(Assistant.say(this, "fx_alert").replace("{sender}", "Test"))
+                  }
+              }
+
+              // Speaks one line with the saved voice, then releases the TTS engine.
+              private fun speakOnce(msg: String) {
+                  var probe: TextToSpeech? = null
+                  val listener = TextToSpeech.OnInitListener { status ->
+                      val t = probe ?: return@OnInitListener
+                      if (status == TextToSpeech.SUCCESS) {
+                          Prefs.applyVoice(this, t)
+                          t.speak(msg, TextToSpeech.QUEUE_FLUSH, null, "alert_test")
+                          window.decorView.postDelayed({ t.shutdown() }, 8000)
+                      } else t.shutdown()
+                  }
+                  val engine = Prefs.str(this, "tts_engine", "")
+                  probe = if (engine.isEmpty()) TextToSpeech(this, listener) else TextToSpeech(this, listener, engine)
+              }
+
+              private fun build() {
+                  val on = AssistantService.instance != null
+                  pulse?.cancel()
+                  pulse = null
+                  loops.forEach { it.cancel() }
+                  loops.clear()
+                  animateCards = !introPlayed
+                  introPlayed = true
+                  cardIdx = 0
+                  val name = Prefs.name(this)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(36), dp(16), dp(32))
+                  }
+                  spin?.cancel()
+                  val badge = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_dock)
+                      layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { bottomMargin = dp(6) }
+                      cameraDistance = 12000f * resources.displayMetrics.density
+                  }
+                  spin = ObjectAnimator.ofFloat(badge, View.ROTATION_Y, 0f, 360f).apply {
+                      duration = 4000
+                      repeatCount = ObjectAnimator.INFINITE
+                      interpolator = android.view.animation.LinearInterpolator()
+                      start()
+                  }
+                  root.addView(badge)
+                  root.addView(label(name, 32f, TXT, true))
+                  root.addView(label("Aapka voice busy-reply assistant", 14f, MUTED))
+
+                  val power = TextView(this).apply {
+                      text = if (on) "ON" else "OFF"
+                      textSize = 30f
+                      typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      val c1 = if (on) ACC else Color.parseColor("#2A3050")
+                      val c2 = if (on) ACC2 else Color.parseColor("#1F2440")
+                      background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(c1, c2)).apply {
+                          shape = GradientDrawable.OVAL
+                          setStroke(dp(4), if (on) ACC2 else Color.parseColor("#39406A"))
+                      }
+                      layoutParams = LinearLayout.LayoutParams(dp(150), dp(150)).apply {
+                          gravity = Gravity.CENTER_HORIZONTAL
+                          topMargin = dp(22)
+                          bottomMargin = dp(10)
+                      }
+                      setOnClickListener { toggle() }
+                  }
+                  power.elevation = dp(10).toFloat()
+                  power.cameraDistance = 12000f * resources.displayMetrics.density
+                  power.setOnTouchListener { v, e -> pressFx(v, e.action); false }
+                  if (on) {
+                      pulse = ObjectAnimator.ofFloat(power, View.TRANSLATION_Z, dp(2).toFloat(), dp(14).toFloat()).apply {
+                          duration = 1400
+                          repeatCount = ObjectAnimator.INFINITE
+                          repeatMode = ObjectAnimator.REVERSE
+                          start()
+                      }
+                  }
+                  if (animateCards) {
+                      power.scaleX = 0f
+                      power.scaleY = 0f
+                      power.animate().scaleX(1f).scaleY(1f).setStartDelay(150L).setDuration(700)
+                          .setInterpolator(OvershootInterpolator()).start()
+                  }
+                  root.addView(power)
+                  val n = Prefs.int(this, "count", 0)
+                  root.addView(label(
+                      (if (on) "Chal raha hai" else "Band hai - dabayen shuru karne ke liye") +
+                          "  |  Ab tak " + n + " replies", 13f, MUTED
+                  ).apply { gravity = Gravity.CENTER_HORIZONTAL })
+
+                  root.addView(card("Setup", "Ye teen cheezein theek honi chahiye") {
+                      addView(statusRow("Notification Access", listenerOn()) {
+                          startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                      })
+                      addView(statusRow("Mic aur Notification permission", micOk()) { askPerms() })
+                      addView(statusRow("Battery restriction hatayen", batteryOk()) {
+                          startActivity(
+                              Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                  .setData(Uri.parse("package:" + packageName))
+                          )
+                      })
+                      addView(actionRow("Auto-start / Background allow karein", "Kholein") { openAutoStart() })
+                      addView(statusRow("Reply alerts (reply fail hone par)", alertsOn()) {
+                          startActivity(
+                              Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                  .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                          )
+                      })
+                      addView(actionRow("Alert test karein", "Test") { testAlert() })
+                  })
+
+                  root.addView(card("Smart features", "Apne hisaab se on/off karein") {
+                      addView(switchRow("Game mode", "Bolne ki zaroorat nahi, khud 'game' wala reply bhej de", "game", false))
+                      addView(switchRow("Groups ignore karein", "WhatsApp groups ke message na bole", "nogroups", true))
+                      addView(switchRow("Urdu awaz", "Urdu bol kar bhi hukm dein (jaise 'mashroof')", "urdu", false))
+                      addView(switchRow("Restart ke baad yaad dilaye", "Phone on hone par " + name + " shuru karne ki notification aaye", "autostart", true))
+                      addView(switchRow("Quiet hours", "In ghanto mein bolti nahi, chup chaap 'sleeping' reply bhejti hai", "quiet", false))
+                      addView(switchRow("Reply fail alert", "Reply na jaye to chupchaap notification aaye", "alerts", true))
+                      addView(switchRow("Voice alert", "Reply na jaye to " + name + " awaz mein batayegi", "alerts_voice", true))
+                      val tr = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(0, dp(10), 0, 0)
+                      }
+                      tr.addView(label("Se  ", 13f, MUTED))
+                      tr.addView(timeChip("qs", 23 * 60))
+                      tr.addView(label("   tak  ", 13f, MUTED))
+                      tr.addView(timeChip("qe", 7 * 60))
+                      addView(tr)
+                  })
+
+                  root.addView(card("SMS reply kis SIM se", "Sirf local SMS ke liye. WhatsApp par asar nahi") {
+                      val cur = Prefs.int(this@MainActivity, "sim", 0)
+                      val row = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          setPadding(0, dp(14), 0, 0)
+                      }
+                      val names = listOf("Auto", "SIM 1", "SIM 2")
+                      for (i in 0..2) {
+                          val c = chip(names[i], i != cur) {
+                              Prefs.setInt(this@MainActivity, "sim", i)
+                              if (i != 0) askSimPerms()
+                              build()
+                          }
+                          c.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = dp(10) }
+                          row.addView(c)
+                      }
+                      addView(row)
+                      val info = simInfo()
+                      if (info.isNotEmpty()) {
+                          addView(label(info, 12f, MUTED).apply { setPadding(0, dp(10), 0, 0) })
+                      }
+                      addView(label(
+                          "Auto mein default SIM use hogi. Chunne ke baad wahi SIM SMS bhejegi.",
+                          12f, MUTED
+                      ).apply { setPadding(0, dp(10), 0, 0) })
+                  })
+
+                  root.addView(card("Sirf chune hue log", "Khali chorein to sab ke message. Naam comma se alag karein") {
+                      addView(field("Jaise: Ali, Ammi, Boss", Prefs.str(this@MainActivity, "contacts", "")) {
+                          Prefs.setStr(this@MainActivity, "contacts", it)
+                      })
+                  })
+
+                  root.addView(card("Reply messages", "Apne hisaab se badlein") {
+                      for ((k, nm) in Prefs.labels) {
+                          addView(label(nm, 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                          addView(field("Reply likhein", Prefs.reply(this@MainActivity, k)) {
+                              Prefs.setStr(this@MainActivity, "r_" + k, it)
+                          })
+                      }
+                      addView(label(
+                          "Tip: aap jo bhi bolen wahi reply ban kar chala jata hai. Sirf chhota lafz (busy, game, driving, meeting, sleeping, namaz) bolen to upar likha hua reply jata hai.",
+                          12f, MUTED
+                      ).apply { setPadding(0, dp(14), 0, 0) })
+                  })
+
+                  root.addView(card("Assistant ka naam aur awaz", "Naam aur wake word yahan badlein") {
+                      addView(label("Naam", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(field("Jaise: Fatima, Sara, Zara", Prefs.str(this@MainActivity, "aname", "Fatima")) {
+                          Prefs.setStr(this@MainActivity, "aname", it)
+                      })
+                      addView(label("Wake word (bolne ka lafz)", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(field("Khali chorein to naam hi wake word hoga. Jaise: hey dock", Prefs.str(this@MainActivity, "wake", "")) {
+                          Prefs.setStr(this@MainActivity, "wake", it)
+                      })
+                      addView(label("Bolne ka tarika (shabd=sahi bolna; ...)", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(field("Jaise: JWN=jaan; JAN=jaan; Dock=Dhok", Prefs.str(this@MainActivity, "pron", "")) {
+                          Prefs.setStr(this@MainActivity, "pron", it)
+                      })
+                      addView(label("Chup karne ke lafz (comma se alag karein)", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(field("Jaise: shut up, chup raho", Prefs.str(this@MainActivity, "mute_words", "shut up, shutup, chup raho, chup ho ja")) {
+                          Prefs.setStr(this@MainActivity, "mute_words", it)
+                      })
+                      addView(label("Wapas bolne ke lafz (comma se alag karein)", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(field("Jaise: ok sorry, sorry", Prefs.str(this@MainActivity, "unmute_words", "ok sorry, okay sorry, ok sori, okay sori, ok sari")) {
+                          Prefs.setStr(this@MainActivity, "unmute_words", it)
+                      })
+                      addView(actionRow("Bhasha (language)", "Badlein") { pickLang() })
+                      addView(actionRow("Awaz (voice)", "Badlein") { pickVoice() })
+                      addView(actionRow("TTS engine", "Badlein") { pickEngine() })
+                      addView(label("Pitch (kam = narm awaz)", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(seek("pitch", 50, 200, 92))
+                      addView(label("Speed (kam = aahista)", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(seek("rate", 50, 200, 85))
+                      addView(chip("Default par wapas", true) {
+                          Prefs.resetAssistant(this@MainActivity)
+                          restartAssistant()
+                          build()
+                      }.apply {
+                          layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(14) }
+                      })
+                      val muted = Prefs.bool(this@MainActivity, "muted", false)
+                      addView(chip(if (muted) "Bolne dein" else "Chup karein", true) {
+                          Prefs.setBool(this@MainActivity, "muted", !muted)
+                          build()
+                      }.apply {
+                          layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(14) }
+                      })
+                      addView(chip("Test karein", false) { testVoice() }.apply {
+                          layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(14) }
+                      })
+                  })
+
+                  root.addView(card(name + " ki Jaan", "'" + name + "' bol kar kuch poochein. Jawab yahan badal sakti hain") {
+                      addView(switchRow("" + name + " sunein", "'" + name + "' bolne par jawab dein", "fx_on", true))
+                      addView(label("Aapka naam", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      addView(field("Hassan", Prefs.str(this@MainActivity, "owner", "Hassan")) {
+                          Prefs.setStr(this@MainActivity, "owner", it)
+                      })
+                      for ((k, def) in Assistant.defaults) {
+                          addView(label(k.removePrefix("fx_").replace("_", " "), 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                          addView(field("Jawab likhein", Prefs.str(this@MainActivity, k, def)) {
+                              Prefs.setStr(this@MainActivity, k, it)
+                          })
+                      }
+                      addView(label("{owner} = aapka naam, {time} = abhi ka time, {name} = assistant ka naam", 12f, MUTED).apply { setPadding(0, dp(10), 0, 0) })
+                  })
+
+                  val log = Prefs.log(this)
+                  root.addView(card("Activity log", "Kis ko kya reply gaya") {
+                      if (log.isEmpty()) {
+                          addView(label("Abhi tak koi activity nahi.", 13f, MUTED).apply { setPadding(0, dp(12), 0, 0) })
+                      }
+                      for (l in log) {
+                          addView(label(l, 12f, TXT).apply { setPadding(0, dp(10), 0, 0) })
+                      }
+                      if (log.isNotEmpty()) {
+                          val clear = chip("Log saaf karein", true) {
+                              Prefs.setStr(this@MainActivity, "log", "")
+                              build()
+                          }
+                          clear.layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(14) }
+                          addView(clear)
+                      }
+                  })
+
+                  val sv = ScrollView(this).apply {
+                      setBackgroundColor(BG)
+                      isFillViewport = true
+                      addView(root)
+                  }
+                  setContentView(sv)
+              }
+          }
+          DOCK_EOF
+          cat > app/src/main/java/com/dock/app/MessageListener.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.app.Notification
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+
+          class MessageListener : NotificationListenerService() {
+              private val seen = LinkedHashSet<String>()
+              private val packages = setOf(
+                  "com.whatsapp", "com.whatsapp.w4b",
+                  "com.google.android.apps.messaging", "com.samsung.android.messaging",
+                  "com.android.mms", "com.android.messaging"
+              )
+
+              override fun onListenerDisconnected() {
+                  requestRebind(android.content.ComponentName(this, MessageListener::class.java))
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  val svc = AssistantService.instance ?: return
+                  if (sbn.packageName !in packages) return
+                  val n = sbn.notification
+                  if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+                  val ex = n.extras
+                  val title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: return
+                  val text = ex.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: return
+                  if (title == "WhatsApp" || Regex("\\d+ (new )?messages").containsMatchIn(text)) return
+
+                  val isGroup = ex.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION) ||
+                      ex.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE) != null
+                  if (Prefs.bool(this, "nogroups", true) && isGroup) return
+
+                  val only = Prefs.str(this, "contacts", "").split(",")
+                      .map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+                  if (only.isNotEmpty() && only.none { title.lowercase().contains(it) }) return
+
+                  if (svc.isOwn(text)) return
+                  if (!seen.add(sbn.key + "|" + sbn.postTime + "|" + text)) return
+                  if (seen.size > 100) seen.remove(seen.first())
+
+                  var action: Notification.Action? =
+                      n.actions?.firstOrNull { it.remoteInputs?.isNotEmpty() == true }
+                  if (action == null) {
+                      action = Notification.WearableExtender(n).actions
+                          .firstOrNull { it.remoteInputs?.isNotEmpty() == true }
+                  }
+                  val a = action ?: return
+                  svc.enqueue(Pending(title, text, a.remoteInputs, a.actionIntent, sbn.packageName))
+              }
+          }
+          DOCK_EOF
+          cat > app/src/main/java/com/dock/app/AssistantService.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.Manifest
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.RemoteInput
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.ContactsContract
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.telephony.SmsManager
+          import android.telephony.SubscriptionManager
+          import java.util.Calendar
+          import java.util.Locale
+
+          class Pending(
+              val sender: String,
+              val text: String,
+              val inputs: Array<RemoteInput>,
+              val intent: PendingIntent,
+              val pkg: String
+          )
+
+          class AssistantService : Service(), TextToSpeech.OnInitListener {
+              private lateinit var tts: TextToSpeech
+              private var ttsReady = false
+              private val handler = Handler(Looper.getMainLooper())
+              private val queue = ArrayDeque<Pending>()
+              private var working = false
+              private var current: Pending? = null
+              private var recognizer: SpeechRecognizer? = null
+              private var deadline = 0L
+              private var readOnly = false
+              private val lastReply = HashMap<String, Long>()
+              private val sent = ArrayList<String>()
+              private var failId = 100
+              private var failWhy = ""
+
+              // Phrases that tell Fatima to send a reply. Longest first.
+              private val commandPrefixes = listOf(
+                  "reply de do", "reply dedo", "reply karo", "reply do", "reply",
+                  "jawab de do", "jawab do", "jawab", "bhej do", "bhejo"
+              )
+
+              private val keys = listOf(
+                  "busy" to listOf("busy", "bizzy", "mashroof", "مصروف"),
+                  "game" to listOf("game", "gaming", "گیم"),
+                  "driving" to listOf("driving", "drive", "ڈرائیو"),
+                  "meeting" to listOf("meeting", "میٹنگ"),
+                  "sleeping" to listOf("sleep", "sleeping", "نیند", "سو رہا"),
+                  "namaz" to listOf("namaz", "prayer", "نماز")
+              )
+
+              // Say "shut up" to silence Fatima. Say "ok sorry" to bring her back.
+              // Words are set in the app, separated by commas.
+              private fun muteWords() = Prefs.str(this, "mute_words", "shut up, shutup, chup raho, chup ho ja")
+                  .split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+              private fun unmuteWords() = Prefs.str(this, "unmute_words", "ok sorry, okay sorry, ok sori, okay sori, ok sari")
+                  .split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+
+              // Wake words follow the assistant's saved name. "Fatima" also accepts common spellings.
+              private fun wakeWords(): List<String> {
+                  val custom = Prefs.str(this, "wake", "").trim().lowercase()
+                  if (custom.isNotEmpty()) return listOf(custom)
+                  val n = Prefs.name(this).lowercase()
+                  return if (n == "fatima") listOf("fatima", "fatma", "fatema", "فاطمہ") else listOf(n)
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  instance = this
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("dock", "Dock", NotificationManager.IMPORTANCE_LOW)
+                  )
+                  val n = Notification.Builder(this, "dock")
+                      .setContentTitle(Prefs.name(this) + " chal raha hai")
+                      .setContentText("Messages ka intezar hai")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setOngoing(true)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  } else {
+                      startForeground(1, n)
+                  }
+                  val engine = Prefs.str(this, "tts_engine", "")
+                  tts = if (engine.isEmpty()) TextToSpeech(this, this) else TextToSpeech(this, this, engine)
+              }
+
+              override fun onInit(status: Int) {
+                  ttsReady = status == TextToSpeech.SUCCESS
+                  if (!ttsReady) return
+                  Prefs.applyVoice(this, tts)
+                  // Default calm, soft female voice, used only until the user picks one.
+                  if (Prefs.str(this, "tts_voice", "").isEmpty()) {
+                      tts.voices?.firstOrNull {
+                          it.name.contains("female", true) && !it.isNetworkConnectionRequired && it.locale.language == "en"
+                      }?.let { tts.voice = it }
+                  }
+                  tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) {}
+                      override fun onDone(id: String?) { handler.post { spoken(id) } }
+                      @Deprecated("Deprecated in Java")
+                      override fun onError(id: String?) { handler.post { spoken(id) } }
+                  })
+                  handler.post { next() }
+              }
+
+              fun isOwn(t: String): Boolean = sent.any { t.contains(it) }
+
+              fun enqueue(p: Pending) {
+                  handler.post { queue.addLast(p); next() }
+              }
+
+              private fun inQuiet(): Boolean {
+                  if (!Prefs.bool(this, "quiet", false)) return false
+                  val c = Calendar.getInstance()
+                  val now = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE)
+                  val s = Prefs.int(this, "qs", 23 * 60)
+                  val e = Prefs.int(this, "qe", 7 * 60)
+                  return if (s <= e) (now >= s && now < e) else (now >= s || now < e)
+              }
+
+              private fun next() {
+                  if (working || !ttsReady) return
+                  val p = queue.removeFirstOrNull() ?: run { idle(); return }
+                  working = true
+                  current = p
+                  readOnly = false
+                  val recent = System.currentTimeMillis() - (lastReply[p.sender] ?: 0L) < 10 * 60 * 1000L
+                  if (inQuiet()) {
+                      if (recent) skip(p) else autoReply(p, Prefs.reply(this, "sleeping"), "Quiet hours")
+                  } else if (Prefs.bool(this, "game", false)) {
+                      if (recent) skip(p) else autoReply(p, Prefs.reply(this, "game"), "Game mode")
+                  } else {
+                      readOnly = Prefs.bool(this, "muted", false)
+                      val intro = if (recent) " ka dobara message aaya hai. " else " ka message aaya hai. "
+                      say(p.sender + intro + p.text, "msg")
+                  }
+              }
+
+              private fun skip(p: Pending) {
+                  Prefs.addLog(this, p.sender + "  -  dobara reply nahi bheja")
+                  finish()
+              }
+
+              private fun autoReply(p: Pending, text: String, tag: String) {
+                  if (sendReply(p, text, tag)) finish() else failed(p)
+              }
+
+              private fun say(t: String, id: String) {
+                  if (Prefs.bool(this, "muted", false)) { handler.post { spoken(id) }; return }
+                  Prefs.applyVoice(this, tts)
+                  tts.speak(applyPron(t), TextToSpeech.QUEUE_FLUSH, null, id)
+              }
+
+              // Pronunciation list from the app, written as "word=how to say it; word2=...".
+              // Whole words only, one pass: "JWN" and "JAN" can both be set to "jaan" without affecting each other.
+              private fun applyPron(t: String): String {
+                  val map = HashMap<String, String>()
+                  Prefs.str(this, "pron", "").split(";").forEach { pair ->
+                      val kv = pair.split("=", limit = 2)
+                      if (kv.size == 2 && kv[0].trim().isNotEmpty()) map[kv[0].trim().lowercase()] = kv[1].trim()
+                  }
+                  if (map.isEmpty()) return t
+                  val pattern = map.keys.sortedByDescending { it.length }
+                      .joinToString("|") { Regex.escape(it) }
+                  return Regex("\\b(" + pattern + ")\\b", RegexOption.IGNORE_CASE).replace(t) { m ->
+                      map[m.value.lowercase()] ?: m.value
+                  }
+              }
+
+              private fun spoken(id: String?) {
+                  if (id == "fx" || id == "alert") { finish(); return }
+                  val p = current ?: return
+                  if (id == "msg") {
+                      if (readOnly) { finish(); return }
+                      handler.postDelayed({
+                          if (!SpeechRecognizer.isRecognitionAvailable(this)) finish()
+                          else {
+                              deadline = System.currentTimeMillis() + 60000
+                              listen(p)
+                          }
+                      }, 400)
+                  } else if (id == "ack") {
+                      finish()
+                  }
+              }
+
+              private fun listen(p: Pending) {
+                  recognizer?.destroy()
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  recognizer = r
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onResults(res: Bundle?) {
+                          val list = res?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: arrayListOf()
+                          heard(p, list)
+                      }
+                      override fun onError(e: Int) { retryOrFinish(p) }
+                      override fun onReadyForSpeech(b: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(v: Float) {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onPartialResults(b: Bundle?) {}
+                      override fun onEvent(t: Int, b: Bundle?) {}
+                  })
+                  val lang = if (Prefs.bool(this, "urdu", false)) "ur-PK" else "en-IN"
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+                  }
+                  r.startListening(i)
+              }
+
+              private fun retryOrFinish(p: Pending) {
+                  if (System.currentTimeMillis() < deadline - 3000) {
+                      handler.postDelayed({ if (current === p) listen(p) }, 300)
+                  } else finish()
+              }
+
+              private fun heard(p: Pending, results: List<String>) {
+                  val first = (results.firstOrNull() ?: "").trim()
+                  if (first.isEmpty()) { retryOrFinish(p); return }
+                  val low = first.lowercase()
+                  var rest = first
+                  var command = false
+                  for (pre in commandPrefixes) {
+                      if (low == pre || low.startsWith("$pre ")) {
+                          command = true
+                          rest = first.substring(pre.length).trim().trimStart(':', ',', '-').trim()
+                          break
+                      }
+                  }
+                  var reply = rest
+                  var tag = "Voice"
+                  if (command && rest.isEmpty()) {
+                      reply = Prefs.reply(this, "busy")
+                      tag = "Busy"
+                  } else if (rest.split(" ").size <= 3) {
+                      val rl = rest.lowercase()
+                      for ((k, words) in keys) {
+                          if (words.any { it in rl }) {
+                              reply = Prefs.reply(this, k)
+                              tag = Prefs.labels[k] ?: k
+                              break
+                          }
+                      }
+                  }
+                  if (reply.isEmpty()) { retryOrFinish(p); return }
+                  if (sendReply(p, reply, tag)) say("Reply bhej diya", "ack") else failed(p)
+              }
+
+              private fun sendReply(p: Pending, text: String, tag: String): Boolean {
+                  val needsSim = isSms(p) && Prefs.int(this, "sim", 0) != 0
+                  if (needsSim && (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED ||
+                          checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)) {
+                      failWhy = "SMS ya Phone permission nahi hai. App kholkar permission dein."
+                      return false
+                  }
+                  val intent = Intent()
+                  val bundle = Bundle()
+                  for (ri in p.inputs) bundle.putCharSequence(ri.resultKey, text)
+                  RemoteInput.addResultsToIntent(p.inputs, intent, bundle)
+                  return try {
+                      if (!(isSms(p) && sendSmsViaSim(p, text))) p.intent.send(this, 0, intent)
+                      lastReply[p.sender] = System.currentTimeMillis()
+                      sent.add(text)
+                      if (sent.size > 20) sent.removeAt(0)
+                      Prefs.setInt(this, "count", Prefs.int(this, "count", 0) + 1)
+                      Prefs.addLog(this, p.sender + "  >  " + tag + ": " + text)
+                      true
+                  } catch (e: Exception) {
+                      failWhy = "Reply bhejne mein masla aaya. Message ka reply dobara karein."
+                      false
+                  }
+              }
+
+              // Runs after a failed reply: logs it, shows the silent alert, then speaks the voice alert.
+              private fun failed(p: Pending) {
+                  notifyFail(p, failWhy)
+                  if (Prefs.bool(this, "alerts_voice", true) && ttsReady) {
+                      say(Assistant.say(this, "fx_alert").replace("{sender}", p.sender), "alert")
+                  } else finish()
+              }
+
+              // Logs every failed reply. Shows a silent alert only when the user has it switched on.
+              private fun notifyFail(p: Pending, why: String) {
+                  Prefs.addLog(this, p.sender + "  x  reply fail: " + why)
+                  if (!Prefs.bool(this, "alerts", true)) return
+                  Prefs.createAlertChannel(this)
+                  val nm = getSystemService(NotificationManager::class.java)
+                  val n = Notification.Builder(this, "dock_alerts")
+                      .setContentTitle("Reply nahi gaya: " + p.sender)
+                      .setContentText(why)
+                      .setStyle(Notification.BigTextStyle().bigText(why + "\n\nMessage: " + p.text))
+                      .setSmallIcon(android.R.drawable.stat_notify_error)
+                      .setVisibility(Notification.VISIBILITY_PRIVATE)
+                      .setOnlyAlertOnce(true)
+                      .setAutoCancel(true)
+                      .build()
+                  nm.notify(failId++, n)
+              }
+
+              private fun isSms(p: Pending) = !p.pkg.startsWith("com.whatsapp")
+
+              private fun sendSmsViaSim(p: Pending, text: String): Boolean {
+                  val pref = Prefs.int(this, "sim", 0)
+                  if (pref == 0) return false
+                  if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) return false
+                  if (checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return false
+                  val number = findNumber(p.sender) ?: return false
+                  return try {
+                      val subs = getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList
+                          ?: return false
+                      val sub = subs.firstOrNull { it.simSlotIndex == pref - 1 } ?: return false
+                      val mgr = SmsManager.getSmsManagerForSubscriptionId(sub.subscriptionId)
+                      mgr.sendMultipartTextMessage(number, null, mgr.divideMessage(text), null, null)
+                      true
+                  } catch (e: Exception) {
+                      false
+                  }
+              }
+
+              private fun findNumber(name: String): String? {
+                  val digits = name.replace(Regex("[\\s\\-()]"), "")
+                  if (Regex("\\+?\\d{6,15}").matches(digits)) return digits
+                  if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+                  return try {
+                      contentResolver.query(
+                          ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                          arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                          ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " = ?",
+                          arrayOf(name), null
+                      )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+
+              private fun idle() {
+                  if (working || !ttsReady || !Prefs.bool(this, "fx_on", true)) return
+                  working = true
+                  wake()
+              }
+
+              private fun wake() {
+                  recognizer?.destroy()
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  recognizer = r
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onResults(res: Bundle?) {
+                          val text = (res?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: "").lowercase()
+                          if (unmuteWords().any { text.contains(it) }) {
+                              Prefs.setBool(this@AssistantService, "muted", false)
+                              say(Assistant.say(this@AssistantService, "fx_unmute"), "fx")
+                              return
+                          }
+                          if (Prefs.bool(this@AssistantService, "muted", false)) { finish(); return }
+                          if (muteWords().any { text.contains(it) }) {
+                              // Speak the reply first, then mute. The flow continues after it finishes speaking.
+                              say(Assistant.say(this@AssistantService, "fx_mute"), "fx")
+                              Prefs.setBool(this@AssistantService, "muted", true)
+                              return
+                          }
+                          val hit = wakeWords().firstOrNull { text.contains(it) }
+                          if (hit == null) finish()
+                          else say(Assistant.answer(this@AssistantService, text.substringAfter(hit).trim()), "fx")
+                      }
+                      override fun onError(e: Int) { handler.postDelayed({ finish() }, 500) }
+                      override fun onReadyForSpeech(b: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(v: Float) {}
+                      override fun onBufferReceived(b: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onPartialResults(b: Bundle?) {}
+                      override fun onEvent(t: Int, b: Bundle?) {}
+                  })
+                  r.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                  })
+              }
+
+              private fun finish() {
+                  recognizer?.destroy()
+                  recognizer = null
+                  current = null
+                  working = false
+                  next()
+              }
+
+              override fun onTaskRemoved(rootIntent: Intent?) {
+                  // The app was swiped from recents. Keep the service alive and schedule a restart as a backup.
+                  val pi = PendingIntent.getForegroundService(
+                      this, 7, Intent(this, AssistantService::class.java),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT
+                  )
+                  getSystemService(android.app.AlarmManager::class.java)
+                      .set(android.app.AlarmManager.ELAPSED_REALTIME, android.os.SystemClock.elapsedRealtime() + 1500, pi)
+                  super.onTaskRemoved(rootIntent)
+              }
+
+              override fun onStartCommand(i: Intent?, f: Int, s: Int) = START_STICKY
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onDestroy() {
+                  instance = null
+                  recognizer?.destroy()
+                  if (ttsReady) tts.shutdown()
+                  super.onDestroy()
+              }
+
+              companion object {
+                  @Volatile var instance: AssistantService? = null
+              }
+          }
+          DOCK_EOF
+          cat > app/src/main/java/com/dock/app/Prefs.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.content.Context
+          import android.speech.tts.TextToSpeech
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          object Prefs {
+              val defaults = linkedMapOf(
+                  "busy" to "Abhi main busy hoon, baad mein baat karta hoon.",
+                  "game" to "Main game khel raha hoon, baad mein baat karta hoon.",
+                  "driving" to "Main drive kar raha hoon, baad mein baat karta hoon.",
+                  "meeting" to "Main meeting mein hoon, baad mein baat karta hoon.",
+                  "sleeping" to "Main so raha hoon, subah baat karta hoon.",
+                  "namaz" to "Main namaz parh raha hoon, baad mein baat karta hoon."
+              )
+              val labels = linkedMapOf(
+                  "busy" to "Busy", "game" to "Game", "driving" to "Driving",
+                  "meeting" to "Meeting", "sleeping" to "Sleeping / Quiet hours", "namaz" to "Namaz"
+              )
+
+              private fun sp(c: Context) = c.getSharedPreferences("dock", Context.MODE_PRIVATE)
+              fun bool(c: Context, k: String, d: Boolean) = sp(c).getBoolean(k, d)
+              fun setBool(c: Context, k: String, v: Boolean) = sp(c).edit().putBoolean(k, v).apply()
+              fun str(c: Context, k: String, d: String): String = sp(c).getString(k, d) ?: d
+              fun setStr(c: Context, k: String, v: String) = sp(c).edit().putString(k, v).apply()
+              fun int(c: Context, k: String, d: Int) = sp(c).getInt(k, d)
+              fun setInt(c: Context, k: String, v: Int) = sp(c).edit().putInt(k, v).apply()
+              fun reply(c: Context, k: String): String = str(c, "r_" + k, defaults[k] ?: "")
+
+              // Assistant's name, set by the user in the app. Defaults to Fatima.
+              fun name(c: Context): String = str(c, "aname", "Fatima").trim().ifEmpty { "Fatima" }
+
+              // Applies saved pitch and speed (stored x100, 92 = 0.92) and the chosen voice, if any.
+              fun applyVoice(c: Context, t: TextToSpeech) {
+                  t.language = Locale.forLanguageTag(str(c, "tts_lang", "en-IN"))
+                  t.setPitch(int(c, "pitch", 92) / 100f)
+                  t.setSpeechRate(int(c, "rate", 85) / 100f)
+                  val vn = str(c, "tts_voice", "")
+                  if (vn.isNotEmpty()) t.voices?.firstOrNull { it.name == vn }?.let { t.voice = it }
+              }
+
+              // Silent "Dock alerts" channel. The old channel is removed so the new silent settings apply.
+              fun createAlertChannel(c: Context) {
+                  val nm = c.getSystemService(android.app.NotificationManager::class.java)
+                  nm.deleteNotificationChannel("dock_alert")
+                  val ch = android.app.NotificationChannel(
+                      "dock_alerts", "Dock alerts", android.app.NotificationManager.IMPORTANCE_LOW
+                  )
+                  ch.description = "Reply na jaye to chupchaap alert"
+                  ch.setSound(null, null)
+                  ch.enableVibration(false)
+                  nm.createNotificationChannel(ch)
+              }
+
+              // Restores the assistant's voice, name, wake word, language, pronunciation and texts to defaults.
+              fun resetAssistant(c: Context) {
+                  val e = sp(c).edit()
+                  listOf("pitch", "rate", "tts_voice", "tts_engine", "tts_lang", "aname", "wake", "pron", "owner", "mute_words", "unmute_words")
+                      .forEach { e.remove(it) }
+                  defaults.keys.forEach { e.remove("r_" + it) }
+                  Assistant.defaults.keys.forEach { e.remove(it) }
+                  e.apply()
+              }
+
+              fun log(c: Context): List<String> = str(c, "log", "").split("\n").filter { it.isNotBlank() }
+
+              fun addLog(c: Context, line: String) {
+                  val t = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+                  val all = (listOf(t + "  |  " + line.replace("\n", " ")) + log(c)).take(40)
+                  setStr(c, "log", all.joinToString("\n"))
+              }
+          }
+          DOCK_EOF
+          cat > app/src/main/java/com/dock/app/Assistant.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.content.Context
+          import java.util.Calendar
+
+          object Assistant {
+              val defaults = linkedMapOf(
+                  "fx_greet" to "Ji {owner}? Kya ho gaya meri jaan? Main yahan hoon.",
+                  "fx_time" to "Abhi {time} hain, {owner}.",
+                  "fx_thanks" to "Koi baat nahi, {owner}. Hamesha haazir hoon.",
+                  "fx_name" to "Mera naam {name} hai. Main aapki Jaan hoon.",
+                  "fx_game_on" to "Theek hai {owner}, game mode on kar diya.",
+                  "fx_game_off" to "Theek hai {owner}, game mode band kar diya.",
+                  "fx_default" to "Ji {owner}, boliye. Main sun rahi hoon.",
+                  "fx_alert" to "{owner}, {sender} ko reply nahi gaya. Dobara koshish karein.",
+                  "fx_mute" to "Theek hai {owner}, main chup ho rahi hoon.",
+                  "fx_unmute" to "Ji {owner}, main wapas aa gayi. Boliye."
+              )
+
+              fun say(c: Context, key: String, time: String = ""): String {
+                  val owner = Prefs.str(c, "owner", "Hassan")
+                  return Prefs.str(c, key, defaults[key] ?: "")
+                      .replace("{owner}", owner)
+                      .replace("{time}", time)
+                      .replace("{name}", Prefs.name(c))
+              }
+
+              fun answer(c: Context, cmd: String): String {
+                  val low = cmd.lowercase().trim()
+                  return when {
+                      low.isEmpty() -> say(c, "fx_greet")
+                      low.contains("game on") -> { Prefs.setBool(c, "game", true); say(c, "fx_game_on") }
+                      low.contains("game off") -> { Prefs.setBool(c, "game", false); say(c, "fx_game_off") }
+                      low.contains("time") || low.contains("baje") -> say(c, "fx_time", clock())
+                      low.contains("naam") || low.contains("name") -> say(c, "fx_name")
+                      low.contains("shukriya") || low.contains("thank") -> say(c, "fx_thanks")
+                      else -> say(c, "fx_default")
+                  }
+              }
+
+              private fun clock(): String {
+                  val now = Calendar.getInstance()
+                  val h = now.get(Calendar.HOUR_OF_DAY)
+                  val m = now.get(Calendar.MINUTE)
+                  return "%d:%02d %s".format(if (h % 12 == 0) 12 else h % 12, m, if (h < 12) "AM" else "PM")
+              }
+          }
+          DOCK_EOF
+          cat > app/src/main/java/com/dock/app/BootReceiver.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(c: Context, i: Intent) {
+                  if (i.action != Intent.ACTION_BOOT_COMPLETED) return
+                  if (!Prefs.bool(c, "autostart", true)) return
+                  val nm = c.getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("dock_boot", "Dock shuru karein", NotificationManager.IMPORTANCE_HIGH)
+                  )
+                  val open = Intent(c, MainActivity::class.java)
+                      .putExtra("autostart", true)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  val pi = PendingIntent.getActivity(
+                      c, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  val n = Notification.Builder(c, "dock_boot")
+                      .setContentTitle(Prefs.name(c) + " band hai")
+                      .setContentText("Shuru karne ke liye yahan tap karein")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setContentIntent(pi)
+                      .setAutoCancel(true)
+                      .build()
+                  nm.notify(2, n)
+              }
+          }
+          DOCK_EOF
+          cat > app/src/main/java/com/dock/app/SplashActivity.kt <<'DOCK_EOF'
+          package com.dock.app
+
+          import android.animation.AnimatorSet
+          import android.animation.ObjectAnimator
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.animation.OvershootInterpolator
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class SplashActivity : Activity() {
+              private val handler = Handler(Looper.getMainLooper())
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  window.statusBarColor = Color.BLACK
+                  window.navigationBarColor = Color.BLACK
+                  val density = resources.displayMetrics.density
+                  fun dp(v: Int) = (v * density).toInt()
+
+                  val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                  }
+
+                  // The heart flips in from the side in 3D, then floats gently.
+                  val heart = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_dock)
+                      layoutParams = LinearLayout.LayoutParams(dp(120), dp(120))
+                      cameraDistance = 14000f * density
+                      alpha = 0f
+                      scaleX = 0.2f
+                      scaleY = 0.2f
+                      rotationY = 90f
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "Dock"
+                      textSize = 34f
+                      setTextColor(Color.WHITE)
+                      typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER
+                      alpha = 0f
+                      translationY = dp(20).toFloat()
+                      setPadding(0, dp(18), 0, 0)
+                  }
+
+                  val sub = TextView(this).apply {
+                      text = "Aapka voice busy-reply assistant"
+                      textSize = 13f
+                      setTextColor(Color.parseColor("#98A2C8"))
+                      gravity = Gravity.CENTER
+                      alpha = 0f
+                  }
+
+                  // Three loading dots that bounce one after another.
+                  val dots = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER
+                      setPadding(0, dp(36), 0, 0)
+                  }
+                  val dotViews = (0..2).map { _ ->
+                      View(this).apply {
+                          background = GradientDrawable().apply {
+                              shape = GradientDrawable.OVAL
+                              setColor(Color.parseColor("#22D3C5"))
+                          }
+                          layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { setMargins(dp(5), 0, dp(5), 0) }
+                      }
+                  }
+                  dotViews.forEach { dots.addView(it) }
+
+                  col.addView(heart)
+                  col.addView(title)
+                  col.addView(sub)
+                  col.addView(dots)
+                  root.addView(col)
+                  setContentView(root)
+
+                  AnimatorSet().apply {
+                      playTogether(
+                          ObjectAnimator.ofFloat(heart, View.ROTATION_Y, 90f, 0f),
+                          ObjectAnimator.ofFloat(heart, View.SCALE_X, 0.2f, 1f),
+                          ObjectAnimator.ofFloat(heart, View.SCALE_Y, 0.2f, 1f),
+                          ObjectAnimator.ofFloat(heart, View.ALPHA, 0f, 1f)
+                      )
+                      duration = 900
+                      interpolator = OvershootInterpolator(1.2f)
+                      start()
+                  }
+                  ObjectAnimator.ofFloat(heart, View.TRANSLATION_Y, 0f, -dp(10).toFloat()).apply {
+                      duration = 1400
+                      startDelay = 900L
+                      repeatCount = ObjectAnimator.INFINITE
+                      repeatMode = ObjectAnimator.REVERSE
+                      start()
+                  }
+                  title.animate().alpha(1f).translationY(0f).setStartDelay(500L).setDuration(600).start()
+                  sub.animate().alpha(1f).setStartDelay(750L).setDuration(600).start()
+                  dotViews.forEachIndexed { i, dot ->
+                      ObjectAnimator.ofFloat(dot, View.TRANSLATION_Y, 0f, -dp(8).toFloat()).apply {
+                          duration = 420
+                          startDelay = 1000L + i * 150L
+                          repeatCount = ObjectAnimator.INFINITE
+                          repeatMode = ObjectAnimator.REVERSE
+                          start()
+                      }
+                  }
+
+                  // Open the main screen after the animation.
+                  handler.postDelayed({
+                      startActivity(Intent(this, MainActivity::class.java))
+                      overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+                      finish()
+                  }, 2600L)
+              }
+          }
+          DOCK_EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Dock-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
